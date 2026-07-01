@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { TierLayout } from "../shared/TierLayout";
 import {
   Calculator, Plus, Trash2, TrendingUp, HelpCircle, 
@@ -62,6 +62,7 @@ const parseNum = (v: string | number | undefined | null): number => {
 
 const genId = () => Math.random().toString(36).substr(2, 9);
 const formatRupiah = (value: number) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", minimumFractionDigits: 0 }).format(value);
+const HPP_STORAGE_KEY = "hpp_pro_drafts";
 
 interface ExportRow {
   produk: string;
@@ -717,14 +718,24 @@ export function HPPCalculator() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [showGuide, setShowGuide] = useState(false); 
+  const hasLoadedDraft = useRef(false);
 
   useEffect(() => {
-    const localData = localStorage.getItem("hpp_pro_drafts");
-    if (localData) {
-      try { setItems(JSON.parse(localData)); } catch (e) { console.error(e); }
+    const savedData = sessionStorage.getItem(HPP_STORAGE_KEY) || localStorage.getItem(HPP_STORAGE_KEY);
+    if (savedData) {
+      try { setItems(JSON.parse(savedData)); } catch (e) { console.error(e); }
     }
+    hasLoadedDraft.current = true;
     setIsLoading(false);
   }, []);
+
+  useEffect(() => {
+    if (!hasLoadedDraft.current || isLoading) return;
+
+    const draft = JSON.stringify(items);
+    sessionStorage.setItem(HPP_STORAGE_KEY, draft);
+    localStorage.setItem(HPP_STORAGE_KEY, draft);
+  }, [items, isLoading]);
 
   const updateItem = (id: string, field: string, value: any) => setItems((prev) => prev.map((item) => (item.id === id ? { ...item, [field]: value } : item)));
   const removeItem = (id: string) => setItems((prev) => prev.filter((item) => item.id !== id));
@@ -733,7 +744,9 @@ export function HPPCalculator() {
     setIsSaving(true);
     setSaveSuccess(false);
     setTimeout(() => {
-      localStorage.setItem("hpp_pro_drafts", JSON.stringify(items));
+      const draft = JSON.stringify(items);
+      sessionStorage.setItem(HPP_STORAGE_KEY, draft);
+      localStorage.setItem(HPP_STORAGE_KEY, draft);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2500);
       setIsSaving(false);
