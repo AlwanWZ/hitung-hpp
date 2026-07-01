@@ -63,6 +63,240 @@ const parseNum = (v: string | number | undefined | null): number => {
 const genId = () => Math.random().toString(36).substr(2, 9);
 const formatRupiah = (value: number) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", minimumFractionDigits: 0 }).format(value);
 
+interface ExportRow {
+  produk: string;
+  kategori: string;
+  varian: string;
+  totalBiaya: number;
+  hpp: number;
+  hargaPasar: number;
+  hargaJual: number;
+  profit: number;
+  margin: number;
+  targetMargin: number;
+}
+
+const escapeHtml = (value: string | number) =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
+const sanitizePdfText = (value: string | number) =>
+  String(value).normalize("NFKD").replace(/[^\x20-\x7E]/g, "");
+
+const escapePdfText = (value: string | number) =>
+  sanitizePdfText(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+
+const downloadFile = (fileName: string, mimeType: string, content: string) => {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const downloadAnchor = document.createElement("a");
+  downloadAnchor.href = url;
+  downloadAnchor.download = fileName;
+  document.body.appendChild(downloadAnchor);
+  downloadAnchor.click();
+  downloadAnchor.remove();
+  URL.revokeObjectURL(url);
+};
+
+const buildExportRows = (items: ProductItem[]): ExportRow[] => {
+  return items.flatMap((item, index) => {
+    const productName = item.name || `Produk ${index + 1}`;
+
+    if (item.hppType === "fnb") {
+      const fnbD = item.hppData as HPPFnb;
+      const { totalBiaya, baseCostPerUnit } = calcHPP("fnb", fnbD);
+
+      return fnbD.variants.map((variant) => {
+        const hpp = parseNum(variant.baseQty) * (baseCostPerUnit || 0) + parseNum(variant.packagingCost);
+        const hargaJual = parseNum(variant.sellingPrice);
+        const profit = hargaJual > hpp ? hargaJual - hpp : 0;
+        const margin = hargaJual > 0 ? (profit / hargaJual) * 100 : 0;
+
+        return {
+          produk: productName,
+          kategori: "F&B Kuliner",
+          varian: variant.name || "Varian",
+          totalBiaya,
+          hpp,
+          hargaPasar: parseNum(variant.competitorPrice),
+          hargaJual,
+          profit,
+          margin,
+          targetMargin: variant.targetMargin,
+        };
+      });
+    }
+
+    const { totalBiaya, hppPerUnit } = calcHPP(item.hppType, item.hppData);
+    const hargaJual = parseNum(item.sellingPrice);
+    const profit = hargaJual > hppPerUnit ? hargaJual - hppPerUnit : 0;
+    const margin = hargaJual > 0 ? (profit / hargaJual) * 100 : 0;
+
+    return [{
+      produk: productName,
+      kategori: item.hppType === "perdagangan" ? "Dagang" : item.hppType === "servis" ? "Jasa" : "Manufaktur",
+      varian: "-",
+      totalBiaya,
+      hpp: hppPerUnit,
+      hargaPasar: parseNum(item.competitorPrice),
+      hargaJual,
+      profit,
+      margin,
+      targetMargin: item.targetMargin,
+    }];
+  });
+};
+
+const buildExcelContent = (rows: ExportRow[], totals: { hpp: number; selling: number; profit: number }, avgMargin: number) => {
+  const bodyRows = rows.map((row, index) => `
+    <tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(row.produk)}</td>
+      <td>${escapeHtml(row.kategori)}</td>
+      <td>${escapeHtml(row.varian)}</td>
+      <td>${Math.round(row.totalBiaya)}</td>
+      <td>${Math.round(row.hpp)}</td>
+      <td>${Math.round(row.hargaPasar)}</td>
+      <td>${Math.round(row.hargaJual)}</td>
+      <td>${Math.round(row.profit)}</td>
+      <td>${row.margin.toFixed(1)}%</td>
+      <td>${row.targetMargin}%</td>
+    </tr>
+  `).join("");
+
+  return `
+    <html>
+      <head>
+        <meta charset="UTF-8" />
+        <style>
+          table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px; }
+          th, td { border: 1px solid #cbd5e1; padding: 8px; }
+          th { background: #0f766e; color: #ffffff; }
+          .summary th { background: #0f172a; }
+        </style>
+      </head>
+      <body>
+        <table>
+          <tr><th colspan="11">Laporan Kalkulator HPP Offline</th></tr>
+          <tr>
+            <th>No</th>
+            <th>Produk</th>
+            <th>Kategori</th>
+            <th>Varian</th>
+            <th>Total Biaya</th>
+            <th>HPP</th>
+            <th>Harga Pasar</th>
+            <th>Harga Jual</th>
+            <th>Profit</th>
+            <th>Margin</th>
+            <th>Target Margin</th>
+          </tr>
+          ${bodyRows}
+        </table>
+        <br />
+        <table class="summary">
+          <tr><th>Total Modal</th><th>Total Omzet</th><th>Total Profit</th><th>Rata Margin</th></tr>
+          <tr>
+            <td>${Math.round(totals.hpp)}</td>
+            <td>${Math.round(totals.selling)}</td>
+            <td>${Math.round(totals.profit)}</td>
+            <td>${avgMargin}%</td>
+          </tr>
+        </table>
+      </body>
+    </html>
+  `;
+};
+
+const wrapPdfLine = (text: string, maxLength = 105) => {
+  const words = sanitizePdfText(text).split(" ");
+  const lines: string[] = [];
+  let line = "";
+
+  words.forEach((word) => {
+    const nextLine = line ? `${line} ${word}` : word;
+    if (nextLine.length > maxLength) {
+      if (line) lines.push(line);
+      line = word;
+    } else {
+      line = nextLine;
+    }
+  });
+
+  if (line) lines.push(line);
+  return lines;
+};
+
+const buildPdfContent = (rows: ExportRow[], totals: { hpp: number; selling: number; profit: number }, avgMargin: number) => {
+  const reportLines = [
+    "Laporan Kalkulator HPP Offline",
+    `Tanggal Export: ${new Date().toLocaleDateString("id-ID")}`,
+    "",
+    ...rows.flatMap((row, index) => [
+      `${index + 1}. ${row.produk} | ${row.kategori}${row.varian !== "-" ? ` | ${row.varian}` : ""}`,
+      `   HPP: ${formatRupiah(row.hpp)} | Harga Jual: ${formatRupiah(row.hargaJual)} | Profit: ${formatRupiah(row.profit)} | Margin: ${row.margin.toFixed(1)}%`,
+      `   Total Biaya: ${formatRupiah(row.totalBiaya)} | Harga Pasar: ${formatRupiah(row.hargaPasar)} | Target Margin: ${row.targetMargin}%`,
+      "",
+    ]),
+    "Ringkasan",
+    `Total Modal: ${formatRupiah(totals.hpp)}`,
+    `Total Omzet: ${formatRupiah(totals.selling)}`,
+    `Total Profit: ${formatRupiah(totals.profit)}`,
+    `Rata Margin: ${avgMargin}%`,
+  ].flatMap((line) => wrapPdfLine(line));
+
+  const linesPerPage = 52;
+  const pages: string[][] = [];
+  for (let i = 0; i < reportLines.length; i += linesPerPage) {
+    pages.push(reportLines.slice(i, i + linesPerPage));
+  }
+
+  const objects: string[] = [];
+  const pageIds = pages.map((_, index) => 4 + index * 2);
+  const contentIds = pages.map((_, index) => 5 + index * 2);
+
+  objects[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`;
+  objects[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+
+  pages.forEach((pageLines, index) => {
+    const pageId = pageIds[index];
+    const contentId = contentIds[index];
+    const stream = [
+      "BT",
+      "/F1 10 Tf",
+      "14 TL",
+      ...pageLines.map((line, lineIndex) => `1 0 0 1 40 ${800 - lineIndex * 14} Tm (${escapePdfText(line)}) Tj`),
+      "ET",
+    ].join("\n");
+
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`;
+    objects[contentId] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+  });
+
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [];
+
+  for (let i = 1; i < objects.length; i += 1) {
+    if (!objects[i]) continue;
+    offsets[i] = pdf.length;
+    pdf += `${i} 0 obj\n${objects[i]}\nendobj\n`;
+  }
+
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let i = 1; i < objects.length; i += 1) {
+    pdf += `${String(offsets[i] || 0).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+
+  return pdf;
+};
+
 function defaultHPPData(type: HPPType): HPPData {
   if (type === "fnb") return { parentStock: "100", batchYield: "50", yieldUnit: "pcs", bahanBakuUtama: "", bahanPelengkap: "", tenagaKerja: "", overheadDapur: "", variants: [{ id: genId(), name: "Varian Standar", baseQty: "1", packagingCost: "", sellingPrice: "", competitorPrice: "", targetMargin: 40 }] };
   if (type === "perdagangan") return { hargaBeli: "", jumlahUnit: "1", diskon: "", ongkosKirim: "", biayaImport: "", biayaPenyimpanan: "", biayaLain: "" };
@@ -108,11 +342,11 @@ function Tooltip({ term, children }: { term: string; children: React.ReactNode }
       <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((v) => !v); }} className="ml-1 text-slate-400 hover:text-teal-600 transition-colors focus:outline-none">
         <HelpCircle className="w-3.5 h-3.5" />
       </button>
-      <span className={`absolute left-6 top-1/2 -translate-y-1/2 z-50 w-56 bg-slate-800 text-white text-[11px] font-medium rounded-xl p-3 shadow-xl leading-relaxed pointer-events-none transition-all origin-left border border-slate-700 ${open ? "scale-100 opacity-100" : "scale-95 opacity-0 lg:group-hover/tooltip:scale-100 lg:group-hover/tooltip:opacity-100"}`}>
+      <span className={`fixed left-4 right-4 top-24 z-[9999] mx-auto max-w-[320px] bg-slate-800 text-white text-[11px] font-medium rounded-xl p-3 shadow-xl leading-relaxed pointer-events-none transition-all origin-top border border-slate-700 lg:absolute lg:left-6 lg:right-auto lg:top-1/2 lg:mx-0 lg:w-56 lg:max-w-none lg:-translate-y-1/2 lg:origin-left ${open ? "scale-100 opacity-100" : "scale-95 opacity-0 lg:group-hover/tooltip:scale-100 lg:group-hover/tooltip:opacity-100"}`}>
         <strong className="block text-teal-300 mb-1 capitalize text-xs">{term}</strong>
         {children}
       </span>
-      {open && <span className="fixed inset-0 z-40 lg:hidden" onClick={(e) => { e.stopPropagation(); setOpen(false); }} />}
+      {open && <span className="fixed inset-0 z-[9998] lg:hidden" onClick={(e) => { e.stopPropagation(); setOpen(false); }} />}
     </span>
   );
 }
@@ -169,11 +403,11 @@ function HPPPerdaganganForm({ d, set }: { d: HPPPerdagangan; set: (k: keyof HPPP
     <div className="space-y-0.5">
       <div className="grid grid-cols-2 gap-2 mb-3">
         <div className="bg-white p-2 rounded-lg border border-slate-200 shadow-sm">
-          <p className="text-[9px] font-bold text-slate-500 flex items-center gap-1 uppercase mb-1">Harga Kulakan <Tooltip term="Harga Asli Beli">Harga asli 1 unit barang saat kamu membelinya dari supplier/pabrik.</Tooltip></p>
+          <p className="text-[9px] font-bold text-slate-500 flex items-center gap-1 uppercase mb-1">Harga Beli / Unit <Tooltip term="Harga Beli Satuan">Harga beli untuk 1 unit barang dari supplier atau toko tempat kamu mengambil stok.</Tooltip></p>
           <div className="flex items-center gap-1"><span className="text-[10px] text-slate-400 font-bold">Rp</span><input type="text" inputMode="numeric" value={fmt(d.hargaBeli)} onChange={(e) => set("hargaBeli", e.target.value.replace(/\D/g, ""))} placeholder="0" className="w-full text-xs font-bold focus:outline-none bg-transparent text-slate-900" /></div>
         </div>
         <div className="bg-white p-2 rounded-lg border border-slate-200 shadow-sm">
-          <p className="text-[9px] font-bold text-slate-500 flex items-center gap-1 uppercase mb-1">Jml Beli <Tooltip term="Jumlah Pembelian">Total barang yang kamu beli dalam satu kali nota pembelanjaan.</Tooltip></p>
+          <p className="text-[9px] font-bold text-slate-500 flex items-center gap-1 uppercase mb-1">Jumlah Unit <Tooltip term="Jumlah Unit">Total barang yang kamu beli dalam satu transaksi atau satu kali stok masuk.</Tooltip></p>
           <input type="text" inputMode="numeric" value={d.jumlahUnit} onChange={(e) => set("jumlahUnit", e.target.value.replace(/\D/g, ""))} placeholder="1" className="w-full text-xs font-bold bg-transparent focus:outline-none text-slate-900" />
         </div>
       </div>
@@ -507,13 +741,20 @@ export function HPPCalculator() {
   };
 
   const handleExportData = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(items, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `HPP_Pro_Backup_${Date.now()}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
+    const rows = buildExportRows(items);
+    const timestamp = Date.now();
+
+    downloadFile(
+      `HPP_Pro_Laporan_${timestamp}.xls`,
+      "application/vnd.ms-excel;charset=utf-8",
+      buildExcelContent(rows, totals, avgMargin)
+    );
+
+    downloadFile(
+      `HPP_Pro_Laporan_${timestamp}.pdf`,
+      "application/pdf;charset=utf-8",
+      buildPdfContent(rows, totals, avgMargin)
+    );
   };
 
   const totals = items.reduce((acc, item) => {
@@ -552,7 +793,7 @@ export function HPPCalculator() {
           </div>
           
           <button type="button" onClick={handleExportData} className="w-full sm:w-auto px-4 py-2.5 bg-white border border-slate-300 hover:border-slate-400 font-bold text-xs rounded-xl flex items-center justify-center gap-2 shadow-sm transition-colors text-slate-700">
-            <Download className="w-4 h-4 text-slate-500"/> Eksport File (.json)
+            <Download className="w-4 h-4 text-slate-500"/> Eksport File (.pdf/.xls)
           </button>
         </div>
 
