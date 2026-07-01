@@ -3,11 +3,10 @@ import { TierLayout } from "../shared/TierLayout";
 import {
   Calculator, Plus, Trash2, TrendingUp, HelpCircle, 
   ChevronDown, ChevronUp, Package, Save, Loader2, 
-  CheckCheck, Sparkles, Store, Layers, Download, Info
+  CheckCheck, Sparkles, Layers, Download, Info
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────
-type ExperienceLevel = "pemula" | "menengah" | "berpengalaman";
 type HPPType = "manufaktur" | "perdagangan" | "servis" | "fnb";
 
 interface FnbVariant {
@@ -349,7 +348,6 @@ function ProductCard({ item, index, onUpdate, onRemove, showRemove }: any) {
   const [isAiLoading, setIsAiLoading] = useState(false);
 
   const { hppPerUnit, baseCostPerUnit } = calcHPP(item.hppType, item.hppData);
-  const price = parseNum(item.sellingPrice);
   const suggested = hppPerUnit > 0 ? Math.ceil(hppPerUnit / (1 - item.targetMargin / 100) / 500) * 500 : 0;
 
   const setHPP = (k: string, v: string) => onUpdate("hppData", { ...item.hppData, [k]: v });
